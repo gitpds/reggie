@@ -1,60 +1,71 @@
-### WILKE BOT, this is going to get out of control quickly. LEt me think about this.
-from flask import Flask, request, session, redirect, url_for, render_template
-from twilio.twiml.messaging_response import MessagingResponse
-from bot import text
-import openai
 import os
+import time
+from flask import Flask, request, make_response
+from twilio.twiml.messaging_response import MessagingResponse
+import openai
+from google.cloud import secretmanager
+from dotenv import load_dotenv
 
+# Function to access secrets from Google Secret Manager
+def access_secret_version(secret_id):
+    project_id = os.getenv('GCP_PROJECT_ID')  # Set this as an environment variable
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+    response = client.access_secret_version(request={"name": name})
+    return response.payload.data.decode("UTF-8")
 
+# Load environment variables and OpenAI API key
+load_dotenv()
+openai.api_key = access_secret_version("OPENAI_API_KEY")
 
+# Fetch thread_id and assistant_id from Secret Manager
+thread_id = access_secret_version("REGGIE_THREAD")
+assistant_id = access_secret_version("REGGIE_ID")
 
-
-    
+# Initialize the Flask application
 app = Flask(__name__)
-openai.api_key = os.getenv("OPENAI_API_KEY")
-app.config['SECRET_KEY'] = '323434'
 
-@app.route("/", methods=("GET", "POST"))
-def index():
-    if request.method == "POST":
-        animal = request.form["animal"]
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=generate_prompt(animal),
-            temperature=0.6,
-        )
-        return redirect(url_for("index", result=response.choices[0].text))
+# Define the route to receive SMS messages
+@app.route("/sms", methods=['POST'])
+def receive_sms():
+    # Extract message content from the SMS
+    body = request.form['Body']
+    message = body.strip()
+    # print(message)
 
-    result = request.args.get("result")
-    return render_template("index.html", result=result)
+    # Process the incoming message with OpenAI
+    response_text = send_message_to_assistant(thread_id, assistant_id, message)
+    # print(response_text)
 
+    # Create a Twilio MessagingResponse and send the response back
+    twilio_response = MessagingResponse()
+    twilio_response.message(response_text)
+    # print(twilio_response)
+    
+    response = make_response(str(twilio_response))
+    # print(response)
+    response.headers["Content-Type"] = "text/xml"
+    return response
 
-def generate_prompt(animal):
-    return """Suggest three names for an animal that is a superhero!
-
-Animal: Cat
-Names: Captain Sharpclaw, Agent Fluffball, The Incredible Feline
-Animal: Dog
-Names: Ruff the Protector, Wonder Canine, Sir Barks-a-Lot
-Animal: {}
-Names:""".format(
-        animal.capitalize()
+def send_message_to_assistant(thread_id, assistant_id, message, wait_time=5):
+    # Function to interact with OpenAI
+    client = openai.Client()
+    client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=message
     )
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant_id
+    )
+    time.sleep(wait_time)
+    messages = client.beta.threads.messages.list(thread_id)
+    for msg in (messages.data):
+        if msg.role == 'assistant':
+            return msg.content[0].text.value
+    return "No response from the assistant."
 
-
-
-
-@app.route("/text", methods=("GET", "POST"))
-def text_bot():
-    incoming_msg = request.values.get('Body')
-    answer = text(incoming_msg)
-    msg = MessagingResponse()
-    msg.message(answer)
-    return str(msg)
-
-
-
-
+# Run the Flask app
 if __name__ == "__main__":
     app.run(debug=True)
-    
